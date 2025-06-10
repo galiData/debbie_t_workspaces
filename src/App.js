@@ -54,6 +54,7 @@ class WorkspaceService {
       sections.triggers,
       sections.subjectMatterExpert,
       ...(sections.examples || []).map(ex => `Q: ${ex.question} A: ${ex.answer}`).filter(Boolean),
+      ...(sections.confluencePages || []).map(page => `${page.title} ${page.url}`).filter(Boolean),
     ].filter(Boolean);
 
     return textParts.join(' ');
@@ -94,6 +95,7 @@ class WorkspaceService {
     const responsibilities = safeArray(sections.responsibilities).filter(r => getItemValue(r)?.trim());
     const responseGuidelines = safeArray(sections.responseGuidelines).filter(g => getItemValue(g)?.trim());
     const examples = safeArray(sections.examples).filter(ex => ex.question && ex.answer);
+    const confluencePages = safeArray(sections.confluencePages).filter(page => page.url && page.title);
 
     return `<AgentInstructions>
   <Role>
@@ -107,7 +109,16 @@ class WorkspaceService {
   
   <Capabilities>
     <KnowledgeBases>
-${knowledgeBases.length > 0 ? knowledgeBases.map(kb => `      <Source name="${kb}">${knowledgeBaseDescriptions[kb] || 'Integration tool'}</Source>`).join('\n') : '      <Source>No knowledge bases selected</Source>'}
+${knowledgeBases.length > 0 ? knowledgeBases.map(kb => {
+  let description = knowledgeBaseDescriptions[kb] || 'Integration tool';
+  if (kb === 'Confluence' && confluencePages.length > 0) {
+    description += `\n      <SpecificPages>
+${confluencePages.map(page => `        <Page url="${page.url}" title="${page.title}" />`).join('\n')}
+      </SpecificPages>
+      <SearchInstructions>Only search and reference content from the specified Confluence pages above. Do not use other Confluence pages not listed here.</SearchInstructions>`;
+  }
+  return `      <Source name="${kb}">${description}</Source>`;
+}).join('\n') : '      <Source>No knowledge bases selected</Source>'}
     </KnowledgeBases>
   </Capabilities>
   
@@ -168,9 +179,10 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
         updatedAt: new Date().toISOString(),
         knowledgeBases: (workspace.sections?.knowledgeBases || []).join(','),
         triggers: workspace.sections?.triggers || '',
+        confluencePages: JSON.stringify(workspace.sections?.confluencePages || []),
         workspaceData: JSON.stringify(workspace),
-        formattedPrompt: formattedPrompt, // Store the formatted prompt for AI agent access
-        promptVersion: '1.0' // Version tracking for prompt format changes
+        formattedPrompt: formattedPrompt,
+        promptVersion: '2.0' // Updated version for confluence pages support
       };
 
       // Save to Pinecone
@@ -201,7 +213,7 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
         vectorId: vectorId,
         lastSaved: new Date().toISOString(),
         syncedToPinecone: true,
-        formattedPrompt: formattedPrompt, // Include in return for local state
+        formattedPrompt: formattedPrompt,
       };
 
     } catch (error) {
@@ -215,7 +227,6 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
     try {
       console.log('🔄 Fetching workspaces from Pinecone...');
 
-      // Query all workspace vectors (using a dummy vector for listing)
       const response = await fetch(`${this.pineconeHost}/query`, {
         method: 'POST',
         headers: {
@@ -223,7 +234,7 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          vector: new Array(1536).fill(0.1), // Dummy vector for listing
+          vector: new Array(1536).fill(0.1),
           topK: 100,
           includeMetadata: true,
         }),
@@ -247,7 +258,7 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
               score: match.score,
               lastSaved: match.metadata.updatedAt,
               syncedToPinecone: true,
-              formattedPrompt: match.metadata.formattedPrompt, // Include formatted prompt from Pinecone
+              formattedPrompt: match.metadata.formattedPrompt,
               promptVersion: match.metadata.promptVersion || '1.0'
             };
           } catch (e) {
@@ -266,17 +277,10 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
     }
   }
 
-  // Update workspace in Pinecone
-  async updateWorkspace(id, workspace) {
-    // For Pinecone, update is the same as save (upsert)
-    return await this.saveWorkspace(workspace);
-  }
-
   // Delete workspace from Pinecone
   async deleteWorkspace(id) {
     try {
       const vectorId = id.toString().startsWith('workspace_') ? id : `workspace_${id}`;
-
       console.log(`🗑️ Deleting workspace from Pinecone: ${vectorId}`);
 
       const response = await fetch(`${this.pineconeHost}/vectors/delete`, {
@@ -303,114 +307,9 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
       throw error;
     }
   }
-
-  // Search workspaces semantically
-  async searchWorkspaces(query, options = {}) {
-    try {
-      const { topK = 10 } = options;
-
-      console.log(`🔍 Searching for: "${query}"`);
-
-      // Generate embedding for search query
-      const queryEmbedding = await this.generateEmbedding(query);
-
-      // Search in Pinecone
-      const response = await fetch(`${this.pineconeHost}/query`, {
-        method: 'POST',
-        headers: {
-          'Api-Key': this.pineconeApiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          vector: queryEmbedding,
-          topK: topK,
-          includeMetadata: true,
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Pinecone error: ${response.status} - ${errorText}`);
-      }
-
-      const data = await response.json();
-
-      const results = data.matches
-        ?.filter(match => match.metadata?.workspaceData)
-        .map(match => {
-          try {
-            const workspace = JSON.parse(match.metadata.workspaceData);
-            return {
-              ...workspace,
-              vectorId: match.id,
-              score: match.score,
-              relevanceScore: Math.round(match.score * 100),
-              formattedPrompt: match.metadata.formattedPrompt, // Include formatted prompt in search results
-              promptVersion: match.metadata.promptVersion || '1.0'
-            };
-          } catch (e) {
-            console.error('Error parsing workspace data:', e);
-            return null;
-          }
-        })
-        .filter(Boolean) || [];
-
-      console.log(`✅ Found ${results.length} matching workspaces`);
-      return results;
-
-    } catch (error) {
-      console.error('❌ Error searching Pinecone:', error);
-      throw error;
-    }
-  }
-
-  // Get formatted prompt by workspace ID (for AI agent direct access)
-  async getFormattedPrompt(workspaceId) {
-    try {
-      const vectorId = workspaceId.toString().startsWith('workspace_') ? workspaceId : `workspace_${workspaceId}`;
-      
-      console.log(`📋 Fetching formatted prompt for: ${vectorId}`);
-
-      // Fetch specific workspace by ID
-      const response = await fetch(`${this.pineconeHost}/vectors/fetch`, {
-        method: 'POST',
-        headers: {
-          'Api-Key': this.pineconeApiKey,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          ids: [vectorId]
-        }),
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Pinecone error: ${response.status} - ${errorText}`);
-      }
-
-      const data = await response.json();
-      const vector = data.vectors?.[vectorId];
-
-      if (!vector?.metadata?.formattedPrompt) {
-        throw new Error('Formatted prompt not found for this workspace');
-      }
-
-      console.log('✅ Formatted prompt retrieved from Pinecone');
-      return {
-        formattedPrompt: vector.metadata.formattedPrompt,
-        workspaceName: vector.metadata.name,
-        lastUpdated: vector.metadata.updatedAt,
-        promptVersion: vector.metadata.promptVersion || '1.0'
-      };
-
-    } catch (error) {
-      console.error('❌ Error fetching formatted prompt:', error);
-      throw error;
-    }
-  }
 }
 
-// Service instance ready for direct Pinecone integration
+// Service instance
 const workspaceService = new WorkspaceService();
 
 const DebbieWorkspace = () => {
@@ -426,13 +325,13 @@ const DebbieWorkspace = () => {
   const [isRefreshing, setIsRefreshing] = useState(false);
 
   const createDefaultWorkspace = () => ({
-    id: Date.now(), // Use timestamp to ensure uniqueness
+    id: Date.now(),
     name: 'Default Assistant',
     owner: 'Data Engineering Team',
     isDefault: true,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
-    syncedToPinecone: false, // Will be true after first save
+    syncedToPinecone: false,
     sections: {
       role: {
         name: 'Debbie T.',
@@ -440,6 +339,7 @@ const DebbieWorkspace = () => {
       },
       goal: 'Provide comprehensive assistance for data platform users by leveraging multiple knowledge sources.',
       knowledgeBases: ['DBT', 'Jira', 'Asana', 'Confluence'],
+      confluencePages: [],
       responsibilities: [
         'Data Platform Navigation: Help users understand architecture and find documentation',
         'DBT Project Assistance: Analyze dependencies and optimize SQL',
@@ -471,7 +371,6 @@ const DebbieWorkspace = () => {
 
       console.log('🔄 Loading workspaces...');
 
-      // Try to load from Pinecone first
       try {
         const pineconeWorkspaces = await workspaceService.getWorkspaces();
 
@@ -480,7 +379,6 @@ const DebbieWorkspace = () => {
           setWorkspaces(pineconeWorkspaces);
           setActiveWorkspace(0);
         } else {
-          // No workspaces in Pinecone, create default
           console.log('📝 No workspaces found in Pinecone, creating default workspace');
           const defaultWorkspace = createDefaultWorkspace();
           setWorkspaces([defaultWorkspace]);
@@ -488,7 +386,6 @@ const DebbieWorkspace = () => {
         }
       } catch (pineconeError) {
         console.warn('⚠️ Could not load from Pinecone, using default workspace:', pineconeError.message);
-        // Fallback to default workspace if Pinecone fails
         const defaultWorkspace = createDefaultWorkspace();
         setWorkspaces([defaultWorkspace]);
         setActiveWorkspace(0);
@@ -497,7 +394,6 @@ const DebbieWorkspace = () => {
     } catch (error) {
       console.error('❌ Failed to load workspaces:', error);
       setError('Failed to load workspaces.');
-      // Last resort fallback
       const defaultWorkspace = createDefaultWorkspace();
       setWorkspaces([defaultWorkspace]);
       setActiveWorkspace(0);
@@ -541,7 +437,6 @@ const DebbieWorkspace = () => {
   };
 
   const generateFormattedPrompt = (workspace) => {
-    // Use the service method to ensure consistency
     return workspaceService.generateFormattedPrompt(workspace);
   };
 
@@ -561,7 +456,7 @@ const DebbieWorkspace = () => {
       }
 
       updated[activeWorkspace].updatedAt = new Date().toISOString();
-      updated[activeWorkspace].syncedToPinecone = false; // Mark as needing sync
+      updated[activeWorkspace].syncedToPinecone = false;
       return updated;
     });
   };
@@ -579,6 +474,7 @@ const DebbieWorkspace = () => {
         role: { name: 'Debbie T.', description: '' },
         goal: '',
         knowledgeBases: [],
+        confluencePages: [],
         responsibilities: [''],
         communicationStyle: { tone: '', personality: '', approach: '' },
         responseGuidelines: [''],
@@ -608,6 +504,74 @@ const DebbieWorkspace = () => {
           ...updated[activeWorkspace].sections,
           [section]: [...currentArray, newItem]
         },
+        updatedAt: new Date().toISOString(),
+        syncedToPinecone: false
+      };
+
+      return updated;
+    });
+  };
+
+  const addConfluencePage = () => {
+    setWorkspaces(prev => {
+      const updated = [...prev];
+      if (!updated[activeWorkspace]?.sections) return prev;
+
+      const currentPages = Array.isArray(updated[activeWorkspace].sections.confluencePages)
+        ? [...updated[activeWorkspace].sections.confluencePages]
+        : [];
+
+      const newPage = {
+        id: Date.now() + Math.random(),
+        title: '',
+        url: ''
+      };
+
+      updated[activeWorkspace] = {
+        ...updated[activeWorkspace],
+        sections: {
+          ...updated[activeWorkspace].sections,
+          confluencePages: [...currentPages, newPage]
+        },
+        updatedAt: new Date().toISOString(),
+        syncedToPinecone: false
+      };
+
+      return updated;
+    });
+  };
+
+  const updateConfluencePage = (index, field, value) => {
+    setWorkspaces(prev => {
+      const updated = [...prev];
+      if (!updated[activeWorkspace]?.sections?.confluencePages) return prev;
+
+      const currentPages = [...updated[activeWorkspace].sections.confluencePages];
+      if (currentPages[index]) {
+        currentPages[index] = { ...currentPages[index], [field]: value };
+        updated[activeWorkspace] = {
+          ...updated[activeWorkspace],
+          sections: { ...updated[activeWorkspace].sections, confluencePages: currentPages },
+          updatedAt: new Date().toISOString(),
+          syncedToPinecone: false
+        };
+      }
+
+      return updated;
+    });
+  };
+
+  const removeConfluencePage = (index) => {
+    setWorkspaces(prev => {
+      const updated = [...prev];
+      if (!updated[activeWorkspace]?.sections?.confluencePages) return prev;
+
+      const currentPages = [...updated[activeWorkspace].sections.confluencePages];
+      currentPages.splice(index, 1);
+
+      updated[activeWorkspace] = {
+        ...updated[activeWorkspace],
+        sections: { ...updated[activeWorkspace].sections, confluencePages: currentPages },
         updatedAt: new Date().toISOString(),
         syncedToPinecone: false
       };
@@ -729,7 +693,6 @@ const DebbieWorkspace = () => {
     if (!workspace) return;
 
     try {
-      // Delete from Pinecone if it was previously saved
       if (workspace.syncedToPinecone || workspace.vectorId) {
         setError(null);
         console.log(`🗑️ Deleting workspace "${workspace.name}" from Pinecone...`);
@@ -737,15 +700,12 @@ const DebbieWorkspace = () => {
         console.log('✅ Workspace deleted from Pinecone');
       }
 
-      // Remove from local state
       setWorkspaces(prev => prev.filter((_, index) => index !== workspaceIndex));
 
-      // Adjust active workspace index
       if (activeWorkspace >= workspaceIndex) {
         setActiveWorkspace(Math.max(0, activeWorkspace - 1));
       }
 
-      // If no workspaces left, create a default one
       if (workspaces.length === 1) {
         const defaultWorkspace = createDefaultWorkspace();
         setWorkspaces([defaultWorkspace]);
@@ -755,7 +715,6 @@ const DebbieWorkspace = () => {
     } catch (error) {
       console.error('❌ Error deleting workspace:', error);
       setError(`Failed to delete "${workspace.name}" from Pinecone: ${error.message}`);
-      // Still remove from local state even if Pinecone deletion failed
       setWorkspaces(prev => prev.filter((_, index) => index !== workspaceIndex));
       if (activeWorkspace >= workspaceIndex) {
         setActiveWorkspace(Math.max(0, activeWorkspace - 1));
@@ -791,8 +750,7 @@ const DebbieWorkspace = () => {
   };
 
   const handleDeleteConfirm = (workspaceIndex, workspaceName) => {
-    // eslint-disable-next-line no-restricted-globals
-    const shouldDelete = confirm(`Are you sure you want to delete "${workspaceName}"? This will also remove it from Pinecone.`);
+    const shouldDelete = window.confirm(`Are you sure you want to delete "${workspaceName}"? This will also remove it from Pinecone.`);
     if (shouldDelete) {
       deleteWorkspace(workspaceIndex);
     }
@@ -807,11 +765,9 @@ const DebbieWorkspace = () => {
     try {
       console.log('💾 Saving workspace to Pinecone:', currentWorkspace.name);
 
-      // Real Pinecone save - now includes formatted prompt!
       const savedWorkspace = await workspaceService.saveWorkspace(currentWorkspace);
       console.log('✅ Pinecone response:', savedWorkspace);
 
-      // Update local state with save results
       setWorkspaces(prev => {
         const updated = [...prev];
         updated[activeWorkspace] = {
@@ -825,7 +781,6 @@ const DebbieWorkspace = () => {
       setSaveStatus('success');
       console.log('🎉 Workspace and formatted prompt saved successfully to Pinecone!');
 
-      // Clear success message after 3 seconds
       setTimeout(() => setSaveStatus(null), 3000);
 
     } catch (error) {
@@ -833,7 +788,6 @@ const DebbieWorkspace = () => {
       setSaveStatus('error');
       setError(`Failed to save "${currentWorkspace.name}": ${error.message}`);
 
-      // Clear error status after 5 seconds
       setTimeout(() => setSaveStatus(null), 5000);
     } finally {
       setIsSaving(false);
@@ -882,7 +836,7 @@ const DebbieWorkspace = () => {
                 <Bot className="h-8 w-8 text-blue-600" />
                 <h1 className="text-xl font-bold text-gray-900">Debbie T. Workspace</h1>
               </div>
-              <div className="text-sm text-gray-500">Build custom prompts for Bill data assistants</div>
+              <div className="text-sm text-gray-500">Build custom prompts for your data assistant</div>
             </div>
             <div className="flex items-center space-x-3">
               {/* Refresh Button */}
@@ -895,7 +849,7 @@ const DebbieWorkspace = () => {
                 <span>{isRefreshing ? 'Refreshing...' : 'Refresh'}</span>
               </button>
 
-              {/* Save Status Indicator - Enhanced */}
+              {/* Save Status Indicator */}
               {saveStatus && (
                 <div className={`flex items-center space-x-2 px-3 py-2 rounded-md text-sm font-medium transition-all ${
                   saveStatus === 'success' 
@@ -916,15 +870,14 @@ const DebbieWorkspace = () => {
                 </div>
               )}
 
-              {/* Save Button - Fixed styling to ensure visibility */}
+              {/* Save Button */}
               <button
                 onClick={saveCurrentWorkspace}
                 disabled={isSaving}
-                className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:bg-green-400 rounded-md transition-colors disabled:opacity-75 disabled:cursor-not-allowed shadow-sm"
+                className="flex items-center space-x-2 px-4 py-2 text-sm font-medium text-white bg-green-600 hover:bg-green-700 disabled:bg-gray-400 rounded-md transition-colors disabled:opacity-75 disabled:cursor-not-allowed shadow-sm"
                 style={{
                   backgroundColor: isSaving ? '#9CA3AF' : '#059669',
-                  color: '#FFFFFF',
-                  border: 'none'
+                  color: '#FFFFFF'
                 }}
               >
                 <Save className="h-4 w-4" style={{ color: '#FFFFFF' }} />
@@ -1189,6 +1142,72 @@ const DebbieWorkspace = () => {
                       })}
                     </div>
                   </div>
+
+                  {/* Confluence Specific Pages - Show only if Confluence is selected */}
+                  {safeArray(safeGet(currentWorkspace, 'sections.knowledgeBases', [])).includes('Confluence') && (
+                    <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
+                      <div className="flex items-center justify-between mb-3">
+                        <div>
+                          <label className="block text-sm font-medium text-blue-900">Confluence Pages (Advanced)</label>
+                          <p className="text-xs text-blue-700 mt-1">
+                            Specify which Confluence pages the agent should reference. If empty, all Confluence pages will be searched.
+                          </p>
+                        </div>
+                        <button
+                          onClick={addConfluencePage}
+                          className="flex items-center space-x-1 text-blue-600 hover:text-blue-700 text-sm bg-white px-2 py-1 rounded border border-blue-300 hover:border-blue-400"
+                        >
+                          <Plus className="h-4 w-4" />
+                          <span>Add Page</span>
+                        </button>
+                      </div>
+                      <div className="space-y-3">
+                        {safeArray(safeGet(currentWorkspace, 'sections.confluencePages', [])).map((page, index) => (
+                          <div key={page.id || index} className="bg-white border border-blue-200 rounded-md p-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-sm font-medium text-blue-900">Page {index + 1}</span>
+                              <button
+                                onClick={() => removeConfluencePage(index)}
+                                className="p-1 text-red-600 hover:bg-red-50 rounded"
+                                title="Remove page"
+                              >
+                                <Trash2 className="h-4 w-4" />
+                              </button>
+                            </div>
+                            <div className="space-y-2">
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Page Title</label>
+                                <input
+                                  type="text"
+                                  value={page.title || ''}
+                                  onChange={(e) => updateConfluencePage(index, 'title', e.target.value)}
+                                  placeholder="e.g., DataGrip Installation and Tips"
+                                  className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-xs font-medium text-gray-700 mb-1">Page URL</label>
+                                <input
+                                  type="url"
+                                  value={page.url || ''}
+                                  onChange={(e) => updateConfluencePage(index, 'url', e.target.value)}
+                                  placeholder="https://billcom.atlassian.net/wiki/spaces/AN/pages/..."
+                                  className="w-full px-2 py-1 text-sm border border-gray-300 rounded focus:ring-1 focus:ring-blue-500 focus:border-blue-500"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                        {safeArray(safeGet(currentWorkspace, 'sections.confluencePages', [])).length === 0 && (
+                          <div className="text-center py-4 text-blue-600">
+                            <FileText className="h-6 w-6 text-blue-400 mx-auto mb-2" />
+                            <p className="text-sm">No specific pages configured</p>
+                            <p className="text-xs">Agent will search all Confluence content</p>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
 
                   {/* Responsibilities */}
                   <div>
