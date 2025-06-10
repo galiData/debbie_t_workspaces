@@ -171,6 +171,9 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
 
       // Prepare vector data with formatted prompt included
       const vectorId = `workspace_${workspace.id}`;
+      const confluencePages = workspace.sections?.confluencePages || [];
+      const hasSpecificPages = confluencePages.filter(page => page.url && page.title).length > 0;
+      
       const metadata = {
         name: workspace.name,
         owner: workspace.owner || '',
@@ -180,9 +183,11 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
         knowledgeBases: (workspace.sections?.knowledgeBases || []).join(','),
         triggers: workspace.sections?.triggers || '',
         confluencePages: JSON.stringify(workspace.sections?.confluencePages || []),
+        confluencePageCount: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).length : 10,
+        confluenceUrls: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).map(page => page.url).join('|') : '',
         workspaceData: JSON.stringify(workspace),
         formattedPrompt: formattedPrompt,
-        promptVersion: '2.0' // Updated version for confluence pages support
+        promptVersion: '2.1' // Updated version for enhanced confluence filtering
       };
 
       // Save to Pinecone
@@ -1150,7 +1155,8 @@ const DebbieWorkspace = () => {
                         <div>
                           <label className="block text-sm font-medium text-blue-900">Confluence Pages (Advanced)</label>
                           <p className="text-xs text-blue-700 mt-1">
-                            Specify which Confluence pages the agent should reference. If empty, all Confluence pages will be searched.
+                            Specify which Confluence pages the agent should reference. If empty, all Confluence pages will be searched (max 10 results).
+                            When pages are specified, the agent will filter by URL metadata to only return content from these specific pages.
                           </p>
                         </div>
                         <button
@@ -1202,7 +1208,7 @@ const DebbieWorkspace = () => {
                           <div className="text-center py-4 text-blue-600">
                             <FileText className="h-6 w-6 text-blue-400 mx-auto mb-2" />
                             <p className="text-sm">No specific pages configured</p>
-                            <p className="text-xs">Agent will search all Confluence content</p>
+                            <p className="text-xs">Agent will search all Confluence content (max 10 results)</p>
                           </div>
                         )}
                       </div>
