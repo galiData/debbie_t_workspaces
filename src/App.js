@@ -158,21 +158,34 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
   async saveWorkspace(workspace) {
     try {
       console.log('🔄 Generating embedding for workspace...');
-
+  
       // Generate the formatted prompt
       const formattedPrompt = this.generateFormattedPrompt(workspace);
       console.log('✅ Formatted prompt generated');
-
+  
       // Generate embedding from searchable text
       const searchableText = this.createSearchableText(workspace);
       const embedding = await this.generateEmbedding(searchableText);
-
+  
       console.log('✅ Embedding generated, saving to Pinecone...');
-
+  
       // Prepare vector data with formatted prompt included
       const vectorId = `workspace_${workspace.id}`;
       const confluencePages = workspace.sections?.confluencePages || [];
       const hasSpecificPages = confluencePages.filter(page => page.url && page.title).length > 0;
+      
+      // Create different URL formats for Confluence pages
+      const validPages = confluencePages.filter(page => page.url && page.title);
+      
+      // Original comma-separated format
+      const confluenceUrlsCommaSeparated = hasSpecificPages 
+        ? validPages.map(page => page.url).join(',')
+        : '';
+      
+      // NEW: Quoted URLs format - each URL wrapped in quotes, separated by commas
+      const confluenceUrlsQuoted = hasSpecificPages
+        ? validPages.map(page => `"${page.url}"`).join(',')
+        : '';
       
       const metadata = {
         name: workspace.name,
@@ -183,13 +196,15 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
         knowledgeBases: (workspace.sections?.knowledgeBases || []).join(','),
         triggers: workspace.sections?.triggers || '',
         confluencePages: JSON.stringify(workspace.sections?.confluencePages || []),
-        confluencePageCount: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).length : 10,
-        confluenceUrls: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).map(page => page.url).join('|') : '',
+        confluencePageCount: hasSpecificPages ? validPages.length : 10,
+        confluenceUrls: confluenceUrlsQuoted, // UPDATED: Now uses quoted format instead of pipe separator
+        confluenceUrlsCommaSeparated: confluenceUrlsCommaSeparated,
+        confluenceUrlsQuoted: confluenceUrlsQuoted, // NEW: Quoted format (same as confluenceUrls now)
         workspaceData: JSON.stringify(workspace),
         formattedPrompt: formattedPrompt,
-        promptVersion: '2.1' // Updated version for enhanced confluence filtering
+        promptVersion: '2.4' // Updated version for confluenceUrls format change
       };
-
+  
       // Save to Pinecone
       const response = await fetch(`${this.pineconeHost}/vectors/upsert`, {
         method: 'POST',
@@ -205,22 +220,26 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
           }],
         }),
       });
-
+  
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`Pinecone error: ${response.status} - ${errorText}`);
       }
-
+  
       console.log('✅ Workspace and formatted prompt saved to Pinecone successfully!');
-
+      console.log('📋 Added confluence URLs metadata (comma-separated):', confluenceUrlsCommaSeparated);
+      console.log('📋 Added confluence URLs metadata (quoted):', confluenceUrlsQuoted);
+      console.log('📋 Updated confluenceUrls field to use quoted format:', confluenceUrlsQuoted);
+  
       return {
         ...workspace,
         vectorId: vectorId,
         lastSaved: new Date().toISOString(),
         syncedToPinecone: true,
         formattedPrompt: formattedPrompt,
+        confluenceUrlsQuoted: confluenceUrlsQuoted, // Include in returned workspace
       };
-
+  
     } catch (error) {
       console.error('❌ Error saving to Pinecone:', error);
       throw error;
@@ -231,7 +250,7 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
   async getWorkspaces() {
     try {
       console.log('🔄 Fetching workspaces from Pinecone...');
-
+  
       const response = await fetch(`${this.pineconeHost}/query`, {
         method: 'POST',
         headers: {
@@ -244,14 +263,14 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
           includeMetadata: true,
         }),
       });
-
+  
       if (!response.ok) {
         const errorText = await response.text();
         throw new Error(`Pinecone error: ${response.status} - ${errorText}`);
       }
-
+  
       const data = await response.json();
-
+  
       const workspaces = data.matches
         ?.filter(match => match.metadata?.workspaceData)
         .map(match => {
@@ -264,7 +283,9 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
               lastSaved: match.metadata.updatedAt,
               syncedToPinecone: true,
               formattedPrompt: match.metadata.formattedPrompt,
-              promptVersion: match.metadata.promptVersion || '1.0'
+              promptVersion: match.metadata.promptVersion || '1.0',
+              confluenceUrlsCommaSeparated: match.metadata.confluenceUrlsCommaSeparated || '',
+              confluenceUrlsQuoted: match.metadata.confluenceUrlsQuoted || '' // NEW: Include quoted URLs
             };
           } catch (e) {
             console.error('Error parsing workspace data:', e);
@@ -272,10 +293,10 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
           }
         })
         .filter(Boolean) || [];
-
+  
       console.log(`✅ Found ${workspaces.length} workspaces in Pinecone`);
       return workspaces;
-
+  
     } catch (error) {
       console.error('❌ Error fetching from Pinecone:', error);
       throw error;
@@ -841,7 +862,7 @@ const DebbieWorkspace = () => {
                 <Bot className="h-8 w-8 text-blue-600" />
                 <h1 className="text-xl font-bold text-gray-900">Debbie T. Workspace</h1>
               </div>
-              <div className="text-sm text-gray-500">Build custom prompts for your data assistant</div>
+              <div className="text-sm text-gray-500">Build custom prompts for Bill data assistants</div>
             </div>
             <div className="flex items-center space-x-3">
               {/* Refresh Button */}
@@ -991,6 +1012,9 @@ const DebbieWorkspace = () => {
                         )}
                         {workspace.formattedPrompt && (
                           <div className="text-xs text-purple-600 mt-1">📋 Prompt ready</div>
+                        )}
+                        {workspace.confluenceUrlsCommaSeparated && (
+                          <div className="text-xs text-indigo-600 mt-1">🔗 Confluence URLs: {workspace.confluenceUrlsCommaSeparated.split(',').length}</div>
                         )}
                       </div>
 
@@ -1435,6 +1459,12 @@ const DebbieWorkspace = () => {
                         </span>
                       )}
                     </h3>
+                    {/* Show Confluence URLs metadata if available */}
+                    {currentWorkspace.confluenceUrlsCommaSeparated && (
+                      <div className="mt-2 text-xs text-indigo-600 bg-indigo-50 px-2 py-1 rounded">
+                        📋 Confluence URLs Metadata: {currentWorkspace.confluenceUrlsCommaSeparated}
+                      </div>
+                    )}
                   </div>
                   <div className="p-6">
                     <pre className="text-xs bg-gray-50 p-4 rounded-md overflow-auto border whitespace-pre-wrap" style={{maxHeight: '70vh', minHeight: '60vh'}}>
