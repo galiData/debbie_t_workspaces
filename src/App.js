@@ -184,7 +184,7 @@ ${examples.length > 0 ? examples.map(ex => `    <Example>
         triggers: workspace.sections?.triggers || '',
         confluencePages: JSON.stringify(workspace.sections?.confluencePages || []),
         confluencePageCount: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).length : 10,
-        confluenceUrls: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).map(page => page.url).join('|') : '',
+        confluenceUrls: hasSpecificPages ? confluencePages.filter(page => page.url && page.title).map(page => page.url).join(',') : '',
         workspaceData: JSON.stringify(workspace),
         formattedPrompt: formattedPrompt,
         promptVersion: '2.1' // Updated version for enhanced confluence filtering
