@@ -8,7 +8,7 @@ class WorkspaceService {
     // For demo, you'll need to set these directly (NOT recommended for production)
     this.openaiApiKey = process.env.REACT_APP_OPENAI_API_KEY;
     this.pineconeApiKey = process.env.REACT_APP_PINECONE_API_KEY;
-    this.pineconeHost = 'https://bill-debbie-workspace-kpyty8f.svc.aped-4627-b74a.pinecone.io';
+    this.pineconeHost = 'https://bill-debbie-workspace-i33wov7.svc.aped-4627-b74a.pinecone.io';
   }
 
   // Generate embeddings using OpenAI
